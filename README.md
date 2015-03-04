@@ -7,8 +7,8 @@ This patch for OJS 2.4.3 inserts logic to force Section Editors to have their de
 # Installation
 OJS-Draft-Editorial can be installed by using the GNU patch tool from the root of your OJS installation:
 
-> $ patch -p1 < editorial_decision_draft.patch
-> $ mysql -u xxxx -p ojs_database < tbl_draft_decisons.sql
+    $ patch -p1 < editorial_decision_draft.patch
+    $ mysql -u xxxx -p ojs_database < tbl_draft_decisons.sql
 
 To apply this patch to an OJS installation running on PSQL or MSSQL you will need to recreate the tbl_draft_decisions.sql in your own syntax.
 

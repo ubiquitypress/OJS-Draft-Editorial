@@ -1,0 +1,573 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..663efc1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++cache/**
+diff --git a/classes/submission/sectionEditor/SectionEditorSubmissionDAO.inc.php b/classes/submission/sectionEditor/SectionEditorSubmissionDAO.inc.php
+index 42904fd..cba4b95 100644
+--- a/classes/submission/sectionEditor/SectionEditorSubmissionDAO.inc.php
++++ b/classes/submission/sectionEditor/SectionEditorSubmissionDAO.inc.php
+@@ -1104,6 +1104,60 @@ class SectionEditorSubmissionDAO extends DAO {
+ 		return $statistics;
+ 	}
+ 
++	function recordDraftDecision($articleID, $Key, $seniorEditorID, $juniorEditorID, $Subject, $Body, $Note, $Decision, $Status) {
++		$this->update(
++			'INSERT INTO draft_decisions
++				(key_val, senior_editor_id, junior_editor_id, article_id, decision, subject, body, note, status)
++				VALUES
++				(?, ?, ?, ?, ?, ?, ?, ?, ?)',
++			array($Key, $seniorEditorID, $juniorEditorID, $articleID, $Decision, $Subject, $Body, $Note, $Status)
++		);
++	}
++
++	function getArticleDrafts($articleId) {
++		$result =& $this->retrieve(
++			'SELECT dd.key_val, dd.decision, dd.article_id, u.first_name, u.last_name
++			 FROM draft_decisions dd
++			 JOIN users u ON dd.junior_editor_id = u.user_id
++			 WHERE article_id = ? AND dd.status = ?',
++			array($articleId, 'draft')
++		);
++
++		return $result;
++	}
++
++	function getDraftDecision($key) {
++		$result =& $this->retrieve(
++			"SELECT dd.*, concat(u.first_name, ' ' , u.last_name) AS junior_editor_name
++			 FROM draft_decisions dd
++			 JOIN users u ON dd.junior_editor_id = u.user_id
++			 WHERE key_val = ? LIMIT 1",
++			array($key)
++		);
++
++		return $result;
++	}
++
++	function getUserEmail($id) {
++		$result =& $this->retrieve(
++			"SELECT email FROM users WHERE user_id = ? LIMIT 1", array($id)
++		);
++
++		return $result->fields['email'];
++	}
++
++	function updateDraft($params) {
++		$this->update(
++			'UPDATE draft_decisions SET decision = ?, subject = ?, body = ?, note = ? WHERE id = ?', $params
++		);
++	}
++
++	function setDraftStatus($id, $status){
++		$this->update(
++			'UPDATE draft_decisions SET status = ? WHERE id = ?', array($status, $id)
++		);
++	}
++
+ 	/**
+ 	 * Map a column heading value to a database value for sorting
+ 	 * @param string
+diff --git a/dbscripts/patches/tbl_draft_decisions.sql b/dbscripts/patches/tbl_draft_decisions.sql
+new file mode 100644
+index 0000000..5f6659e
+--- /dev/null
++++ b/dbscripts/patches/tbl_draft_decisions.sql
+@@ -0,0 +1,14 @@
++CREATE TABLE `draft_decisions` (
++  `id` int(11) NOT NULL AUTO_INCREMENT,
++  `key_val` varchar(45) NOT NULL,
++  `senior_editor_id` int(11) NOT NULL,
++  `junior_editor_id` int(11) NOT NULL,
++  `article_id` int(11) NOT NULL,
++  `decision` int(11) NOT NULL,
++  `subject` varchar(200) DEFAULT NULL,
++  `body` text,
++  `note` text,
++  `attatchment` text,
++  `status` varchar(45) NOT NULL,
++  PRIMARY KEY (`id`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+diff --git a/pages/editor/index.php b/pages/editor/index.php
+index 54ce192..a3f376b 100644
+--- a/pages/editor/index.php
++++ b/pages/editor/index.php
+@@ -27,6 +27,8 @@ switch ($op) {
+ 	case 'submission':
+ 	case 'submissionRegrets':
+ 	case 'submissionReview':
++	case 'draftDecision':
++	case 'viewDraftDecision':
+ 	case 'submissionEditing':
+ 	case 'submissionHistory':
+ 	case 'submissionCitations':
+diff --git a/pages/sectionEditor/SubmissionEditHandler.inc.php b/pages/sectionEditor/SubmissionEditHandler.inc.php
+index 947692f..6479ec0 100644
+--- a/pages/sectionEditor/SubmissionEditHandler.inc.php
++++ b/pages/sectionEditor/SubmissionEditHandler.inc.php
+@@ -193,6 +193,8 @@ class SubmissionEditHandler extends SectionEditorHandler {
+ 		$reviewAssignmentDao =& DAORegistry::getDAO('ReviewAssignmentDAO');
+ 		$reviewFormDao =& DAORegistry::getDAO('ReviewFormDAO');
+ 
++		$drafts = $sectionEditorSubmissionDao->getArticleDrafts($articleId);
++
+ 		// Setting the round.
+ 		$round = isset($args[1]) ? $args[1] : $submission->getCurrentRound();
+ 
+@@ -244,6 +246,14 @@ class SubmissionEditHandler extends SectionEditorHandler {
+ 			$reviewFormResponses[$reviewAssignment->getId()] = $reviewFormResponseDao->reviewFormResponseExists($reviewAssignment->getId());
+ 		}
+ 
++		// Detect if user is a full editor.
++		$roleDao =& DAORegistry::getDAO('RoleDAO');
++		$user =& Request::getUser();
++		$isEditor = $roleDao->userHasRole($journal->getId(), $user->getId(), ROLE_ID_EDITOR);
++		
++		// TODO: Pull from CONFIG!
++		$draftingDisabled = Config::getVar('general', 'disable_drafting');
++
+ 		$templateMgr =& TemplateManager::getManager();
+ 
+ 		$templateMgr->assign_by_ref('submission', $submission);
+@@ -273,10 +283,215 @@ class SubmissionEditHandler extends SectionEditorHandler {
+ 		$templateMgr->assign('allowResubmit', $allowResubmit);
+ 		$templateMgr->assign('allowCopyedit', $allowCopyedit);
+ 
++		$templateMgr->assign('isEditor', $isEditor);
++		$templateMgr->assign('draftingDisabled', $draftingDisabled);
++		$templateMgr->assign('drafts', $drafts);
++
+ 		$templateMgr->assign('helpTopicId', 'editorial.sectionEditorsRole.review');
+ 		$templateMgr->display('sectionEditor/submissionReview.tpl');
+ 	}
+ 
++
++	/**
++	 * View the submission review page.
++	 * @param $args array
++	 * @param $request PKPRequest
++	 */
++	function draftDecision($args, &$request) {
++		$articleId = isset($args[0]) ? (int) $args[0] : 0;
++		$this->validate($articleId, SECTION_EDITOR_ACCESS_REVIEW);
++		$journal =& Request::getJournal();
++		$submission =& $this->submission;
++		$user =& $request->getUser();
++		$this->setupTemplate(true, $articleId);
++
++		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_draft'])) {
++
++			$decision = $_POST["decision"];
++			$senioreditorId = $_POST["editor"];
++			$subject = $_POST["subject"];
++			$body = $_POST["body"];
++			$note = $_POST["note"];
++			$status = 'draft';
++			$key = uniqid('draft_', true);
++			$junioreditorId = $user->getId();
++
++			$articleDao =& DAORegistry::getDAO('ArticleDAO');
++			$article =& $articleDao->getArticle($articleId);
++
++			//$articleID, $Key, $seniorEditorID, $juniorEditorID, $Subject, $Body, $Note, $Decision, $Status
++			$sectioneditorSubmissionDao =& DAORegistry::getDAO('SectionEditorSubmissionDAO');
++			$draft = $sectioneditorSubmissionDao->recordDraftDecision($articleId, $key, $senioreditorId, $junioreditorId, $subject, $body, $note, $decision, $status);
++
++			// lets send an email to the editor :D
++			$base_url = Config::getVar('general', 'base_url');
++			$senior_editor_email = $sectioneditorSubmissionDao->getUserEmail($senioreditorId);
++			$email_message = $article->getArticleTitle() . " has a new draft decision. View the draft: " . $base_url . "/index.php/" . $journal->getPath() ."/editor/viewDraftDecision/" . $articleId . "?key=" . $key;
++			import('lib.pkp.classes.mail.Mail');
++			$email = new Mail();
++			$userDao =& DAORegistry::getDAO('UserDAO');
++			$authorUser =& $userDao->getUser($submission->getUserId());
++			$email->setSubject('New Draft Decision');
++			$email->setBody($email_message);
++			$email->addRecipient($senior_editor_email);
++			$email->send();
++			$request->redirect(null, null, 'submissionReview', $articleId);
++	
++		} elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
++			$decision = $_POST["decision"];
++			$decisionTemplateMap = array(
++				SUBMISSION_EDITOR_DECISION_ACCEPT => 'EDITOR_DECISION_ACCEPT',
++				SUBMISSION_EDITOR_DECISION_PENDING_REVISIONS => 'EDITOR_DECISION_REVISIONS',
++				SUBMISSION_EDITOR_DECISION_RESUBMIT => 'EDITOR_DECISION_RESUBMIT',
++				SUBMISSION_EDITOR_DECISION_DECLINE => 'EDITOR_DECISION_DECLINE'
++			);
++
++			$articleDao =& DAORegistry::getDAO('ArticleDAO');
++			$article =& $articleDao->getArticle($articleId);
++
++			import('classes.mail.ArticleMailTemplate');
++			$email = new ArticleMailTemplate(
++				$article,
++				isset($decisionTemplateMap[$decision])?$decisionTemplateMap[$decision]:null
++			);
++			$userDao =& DAORegistry::getDAO('UserDAO');
++			$authorUser =& $userDao->getUser($submission->getUserId());
++			$email->assignParams(array(
++				'editorialContactSignature' => $user->getContactSignature(),
++				'authorName' => $authorUser->getFullName(),
++				'journalTitle' => $journal->getLocalizedTitle(),
++				'articleTitle' => $article->getArticleTitle()
++			));
++
++			$title = $article->getArticleTitle();
++			$email_subject = $email->getSubject('en_us') . ' ' . $title;
++
++		} else {
++			$request->redirect(null, null, 'submissionReview', $articleId);
++		}
++
++		// Detect if user is a full editor.
++		$roleDao =& DAORegistry::getDAO('RoleDAO');
++		$user =& Request::getUser();
++		$isEditor = $roleDao->userHasRole($journal->getId(), $user->getId(), ROLE_ID_EDITOR);
++		$editors = $roleDao->getUsersByRoleId(ROLE_ID_EDITOR, $journal->getId());
++
++		// Assign to the template
++		$templateMgr =& TemplateManager::getManager();
++
++		$templateMgr->assign_by_ref('submission', $submission);
++		$templateMgr->assign_by_ref('editors', $editors);
++		$templateMgr->assign('isEditor', $isEditor);
++		$templateMgr->assign('editorDecisionOptions', SectionEditorSubmission::getEditorDecisionOptions());
++		$templateMgr->assign('email', $email);
++		$templateMgr->assign('title', $email_subject);
++		$templateMgr->assign('decision', $decision);
++
++		$templateMgr->display('sectionEditor/draftDecision.tpl');
++	}
++
++	function viewDraftDecision($args, &$request) {
++		$articleId = isset($args[0]) ? (int) $args[0] : 0;
++		$this->validate($articleId, SECTION_EDITOR_ACCESS_REVIEW);
++		$journal =& Request::getJournal();
++		$submission =& $this->submission;
++		$user =& $request->getUser();
++		$this->setupTemplate(true, $articleId);
++		$key = $_GET['key'];
++
++		$sectionEditorSubmissionDao =& DAORegistry::getDAO('SectionEditorSubmissionDAO');
++		$draft = $sectionEditorSubmissionDao->getDraftDecision($key);
++
++		$roleDao =& DAORegistry::getDAO('RoleDAO');
++		$isEditor = $roleDao->userHasRole($journal->getId(), $user->getId(), ROLE_ID_EDITOR);
++
++		$articleDao =& DAORegistry::getDAO('ArticleDAO');
++		$article =& $articleDao->getArticle($articleId);
++
++		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_draft'])) {
++			$view = 'edit';
++		} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_changes'])) {
++			$params = array();
++			$params[] = $_POST["decision"];
++			$params[] = $_POST["subject"];
++			$params[] = $_POST["body"];
++			$params[] = $_POST["note"];
++			$params[] = $draft->fields['id'];
++
++			$sectionEditorSubmissionDao->updateDraft($params);
++
++			$draft = $sectionEditorSubmissionDao->getDraftDecision($key);
++			$view = 'view';
++			
++		} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['decline_draft'])) {
++			$sectionEditorSubmissionDao->setDraftStatus($draft->fields['id'], 'declined');
++			$request->redirect(null, null, 'submissionReview', $articleId);
++
++		} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accept_draft'])) {
++			switch ($draft->fields['decision']) {
++			case SUBMISSION_EDITOR_DECISION_ACCEPT:
++			case SUBMISSION_EDITOR_DECISION_PENDING_REVISIONS:
++			case SUBMISSION_EDITOR_DECISION_RESUBMIT:
++			case SUBMISSION_EDITOR_DECISION_DECLINE:
++				SectionEditorAction::recordDecision($submission, $draft->fields['decision'], $request);
++				$sectionEditorSubmissionDao->setDraftStatus($draft->fields['id'], 'accepted');
++
++				$userDao =& DAORegistry::getDAO('UserDAO');
++				$authorUser =& $userDao->getUser($submission->getUserId());
++				$authorEmail = $authorUser->getEmail();
++				
++				import('lib.pkp.classes.mail.Mail');
++				$email = new Mail();
++				$userDao =& DAORegistry::getDAO('UserDAO');
++				$authorUser =& $userDao->getUser($submission->getUserId());
++				$email->setSubject($draft->fields['subject']);
++				$email->setBody($draft->fields['body']);
++				$email->addRecipient($authorEmail);
++				$email->send();
++
++				if ($draft->fields['decision'] == SUBMISSION_EDITOR_DECISION_DECLINE) {
++					// If the most recent decision was a decline,
++					// sending this email archives the submission.
++					$submission->setStatus(STATUS_ARCHIVED);
++					$submission->stampStatusModified();
++					$sectionEditorSubmissionDao->updateSectionEditorSubmission($submission);
++				}
++
++				$articleCommentDao =& DAORegistry::getDAO('ArticleCommentDAO');
++				$articleComment = new ArticleComment();
++				$articleComment->setCommentType(COMMENT_TYPE_EDITOR_DECISION);
++				$articleComment->setRoleId(Validation::isEditor()?ROLE_ID_EDITOR:ROLE_ID_SECTION_EDITOR);
++				$articleComment->setArticleId($draft->fields['article_id']);
++				$articleComment->setAuthorId($submission->getUserId());
++				$articleComment->setCommentTitle($draft->fields['subject']);
++				$articleComment->setComments($draft->fields['body']);
++				$articleComment->setDatePosted(Core::getCurrentDate());
++				$articleComment->setViewable(true);
++				$articleComment->setAssocId($submission->getId());
++				$articleCommentDao->insertArticleComment($articleComment);
++				break;
++
++			//$request->redirect(null, null, 'submissionReview', $articleId);
++		}
++
++		$request->redirect(null, null, 'submissionReview', $articleId);
++		} else {
++			$view = 'view';
++		}
++
++		// Assign to the template
++		$templateMgr =& TemplateManager::getManager();
++
++		$templateMgr->assign_by_ref('submission', $submission);
++		$templateMgr->assign_by_ref('editorDecisionOptions', SectionEditorSubmission::getEditorDecisionOptions());
++		$templateMgr->assign('draft', $draft);
++		$templateMgr->assign('view', $view);
++		$templateMgr->assign('isEditor', $isEditor);
++
++		$templateMgr->display('sectionEditor/viewDraftDecision.tpl');
++	}
++
++
+ 	/**
+ 	 * View the submission editing page.
+ 	 * @param $args array
+diff --git a/pages/sectionEditor/index.php b/pages/sectionEditor/index.php
+index e834cf0..42536bb 100644
+--- a/pages/sectionEditor/index.php
++++ b/pages/sectionEditor/index.php
+@@ -27,6 +27,8 @@ switch ($op) {
+ 	case 'submission':
+ 	case 'submissionRegrets':
+ 	case 'submissionReview':
++	case 'draftDecision':
++	case 'viewDraftDecision':
+ 	case 'submissionEditing':
+ 	case 'submissionHistory':
+ 	case 'submissionCitations':
+diff --git a/templates/sectionEditor/draftDecision.tpl b/templates/sectionEditor/draftDecision.tpl
+new file mode 100644
+index 0000000..4c9d8b5
+--- /dev/null
++++ b/templates/sectionEditor/draftDecision.tpl
+@@ -0,0 +1,51 @@
++{**
++ * templates/sectionEditor/submissionReview.tpl
++ *
++ * Copyright (c) 2013 Simon Fraser University Library
++ * Copyright (c) 2003-2013 John Willinsky
++ * Distributed under the GNU GPL v2. For full terms see the file docs/COPYING.
++ *
++ * Submission review.
++ *
++ *}
++{strip}
++{translate|assign:"pageTitleTranslated" key="submission.page.review" id=$submission->getId()}{assign var="pageCrumbTitle" value="submission.review"}
++{include file="common/header.tpl"}
++{/strip}
++
++<ul class="menu">
++	<li><a href="{url op="submission" path=$submission->getId()}">{translate key="submission.summary"}</a></li>
++	<li class="current"><a href="{url op="submissionReview" path=$submission->getId()}">{translate key="submission.review"}</a></li>
++	{if $canEdit}<li><a href="{url op="submissionEditing" path=$submission->getId()}">{translate key="submission.editing"}</a></li>{/if}
++	<li><a href="{url op="submissionHistory" path=$submission->getId()}">{translate key="submission.history"}</a></li>
++	<li><a href="{url op="submissionCitations" path=$submission->getId()}">{translate key="submission.citations"}</a></li>
++</ul>
++
++<h3>Draft a Decision</h3>
++<div>
++<p>This email will eventually be sent to the author, but only once approved by a section editor.</p>
++<form method="post" action="{url op="draftDecision" path=$submission->getId()}">
++	<label for="editor">Senior Editor</label><br />
++	<select id="editor" name="editor" class="selectMenu">
++		{iterate from=editors item=user}
++		{assign var="userid" value=$user->getId()}
++		<option value="{$user->getId()}">{$user->getFullName(true)|escape}</option>
++		{/iterate}
++	</select>
++	<br /><br />
++	<label for="subject">Subject</label><br />
++	<input id="subject" name="subject" value="{$title|escape}" size="60" maxlength="200" class="textField" type="text">
++	<br /><br />
++	<label for="body">Body</label><br />
++	<textarea name="body" cols="60" rows="15" class="textArea">{$email->getBody()|escape}</textarea>
++	<br /><br />
++	<label for="note">Note (displayed only to the Editor)</label><br />
++	<textarea name="note" cols="60" rows="5" class="textArea"></textarea>
++	<input type="hidden" name="decision" value="{$decision}" />
++	<input type="hidden" name="articleId" value="{$submission->getId()}" />
++	<br /><br />
++	<input type="submit" name="submit_draft" value="Record Draft" class="button" />
++</form>
++</div>
++{include file="common/footer.tpl"}
++
+diff --git a/templates/sectionEditor/submission/editorDecision.tpl b/templates/sectionEditor/submission/editorDecision.tpl
+index d8fd7e7..5827424 100644
+--- a/templates/sectionEditor/submission/editorDecision.tpl
++++ b/templates/sectionEditor/submission/editorDecision.tpl
+@@ -8,10 +8,16 @@
+  * Subtemplate defining the editor decision table.
+  *
+  *}
++
+ <div id="editorDecision">
++{if $isEditor or $draftingDisabled}
+ <h3>{translate key="submission.editorDecision"}</h3>
++{else}
++<h3>Draft Decision</h3>
++{/if}
+ 
+ <table id="table1" width="100%" class="data">
++{if $isEditor or $draftingDisabled}
+ <tr valign="top">
+ 	<td class="label" width="20%">{translate key="editor.article.selectDecision"}</td>
+ 	<td width="80%" class="value">
+@@ -60,6 +66,30 @@
+ 		{/if}
+ 	</td>
+ </tr>
++{else}
++<tr valign="top">
++	<td class="label" width="20%">Select a Draft Decision</td>
++	<td width="80%" class="value">
++		As a section editor you cannot make decisions, but may build a draft for a Senior Editor to approve.
++		<form method="post" action="{url op="draftDecision" path=$submission->getId()}">
++			<select name="decision" size="1" class="selectMenu">
++				{html_options_translate options=$editorDecisionOptions}
++			</select>
++			<input type="submit" name="submit" value="Record Draft" class="button" />
++		</form>
++	</td>
++</tr>
++{/if}
++<tr valign="top">
++	<td class="label" width="20%">View a current draft</td>
++	<td width="80%" class="value">
++		{foreach from=$drafts item=draft}
++			{assign var="decision" value=$draft.decision}
++			<a href="{url op="viewDraftDecision" path=$draft.article_id key=$draft.key_val}">{translate key=$editorDecisionOptions.$decision} - {$draft.first_name} {$draft.last_name}</a><br />
++		{/foreach}
++	</td>
++</tr>
++
+ </table>
+ 
+ <form method="post" action="{url op="editorReview"}" enctype="multipart/form-data">
+@@ -161,6 +191,17 @@
+ 			<td width="80%" class="nodata">{translate key="common.none"}</td>
+ 		</tr>
+ 	{/foreach}
++	{if $datapaper_feature_enabled}
++		{if $datapaper}
++		<tr valign="top">
++			<td class="label">&nbsp;</td>
++			<td class="value">
++				"{$datapaper.NAME|truncate:50}"
++				<input type="submit" name="submit-datapaper" value="Import any changes" class="button" />
++			</td>
++		</tr>
++		{/if}
++	{/if}
+ 	<tr valign="top">
+ 		<td class="label">&nbsp;</td>
+ 		<td class="value">
+@@ -172,5 +213,4 @@
+ </table>
+ 
+ </form>
+-</div>
+-
++</div>
+\ No newline at end of file
+diff --git a/templates/sectionEditor/viewDraftDecision.tpl b/templates/sectionEditor/viewDraftDecision.tpl
+new file mode 100644
+index 0000000..56f53a9
+--- /dev/null
++++ b/templates/sectionEditor/viewDraftDecision.tpl
+@@ -0,0 +1,70 @@
++{**
++ * templates/sectionEditor/submissionReview.tpl
++ *
++ * Copyright (c) 2013 Simon Fraser University Library
++ * Copyright (c) 2003-2013 John Willinsky
++ * Distributed under the GNU GPL v2. For full terms see the file docs/COPYING.
++ *
++ * Submission review.
++ *
++ *}
++{strip}
++{translate|assign:"pageTitleTranslated" key="submission.page.review" id=$submission->getId()}{assign var="pageCrumbTitle" value="submission.review"}
++{include file="common/header.tpl"}
++{/strip}
++
++<ul class="menu">
++	<li><a href="{url op="submission" path=$submission->getId()}">{translate key="submission.summary"}</a></li>
++	<li class="current"><a href="{url op="submissionReview" path=$submission->getId()}">{translate key="submission.review"}</a></li>
++	{if $canEdit}<li><a href="{url op="submissionEditing" path=$submission->getId()}">{translate key="submission.editing"}</a></li>{/if}
++	<li><a href="{url op="submissionHistory" path=$submission->getId()}">{translate key="submission.history"}</a></li>
++	<li><a href="{url op="submissionCitations" path=$submission->getId()}">{translate key="submission.citations"}</a></li>
++</ul>
++
++<h3>View Drafted Decision</h3>
++<div>
++<form method="POST">
++{if $view == 'view'}
++<p>You can Decline, Edit or Accept this draft. On acceptance the decision is recored and the email will be sent to the author.</p>
++{foreach from=$draft item=d}
++	{assign var="decision" value=$d.decision}
++	<h5>Editor:</h5>
++	{$d.junior_editor_name}
++	<h5>Recommendation:</h5>
++	{translate key=$editorDecisionOptions.$decision}
++	<h5>Note from Editor:</h5>
++	{$d.note}
++	<h5>Subject:</h5>
++	{$d.subject}
++	<h5>Body:</h5>
++	{$d.body|nl2br}
++{/foreach}
++<br /><br />
++{if $isEditor }<input type="submit" name="decline_draft" value="Decline Draft" class="button" /> &nbsp;&nbsp;{/if}<input type="submit" name="edit_draft" value="Edit Draft" class="button" /> &nbsp;&nbsp;{if $isEditor}<input type="submit" name="accept_draft" value="Accept Draft" class="button defaultButton" />{/if}
++{else}
++{foreach from=$draft item=d}
++{assign var="decision" value=$d.decision}
++<h5>Editor:</h5>
++{$d.junior_editor_name}
++<br /><br />
++<label for="decision">Decision</label><br />
++<select name="decision" size="1" class="selectMenu">
++	{html_options_translate options=$editorDecisionOptions selected=$d.decision}
++</select>
++<br /><br />
++<label for="subject">Subject</label><br />
++<input id="subject" name="subject" value="{$d.subject|escape}" size="60" maxlength="200" class="textField" type="text">
++<br /><br />
++<label for="body">Body</label><br />
++<textarea name="body" cols="60" rows="15" class="textArea">{$d.body}</textarea>
++<br /><br />
++<label for="note">Note (displayed only to the Editor)</label><br />
++<textarea name="note" cols="60" rows="5" class="textArea">{$d.note}</textarea>
++<br /><br />
++<input type="submit" name="save_changes" value="Save Changes" class="button defaultButton" />
++{/foreach}
++{/if}
++</form>
++</div>
++{include file="common/footer.tpl"}
++
